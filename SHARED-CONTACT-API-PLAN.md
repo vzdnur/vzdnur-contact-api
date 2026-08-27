@@ -2,11 +2,13 @@
 
 ## 1. Ziel des Projekts
 
-Eine gemeinsame, mandantenfaehige Contact-API, die mehrere Websites mit
+Eine gemeinsame, generische Contact-API, die mehrere Websites mit
 unterschiedlichen Kontaktformularen bedient. Statt pro Projekt eine eigene
-contact-api zu deployen, laeuft eine einzige Instanz, die anhand von
-Origin (Host) und Route die richtige Konfiguration (Schema, E-Mail,
-Turnstile, CORS) auswaehlt.
+contact-api zu deployen, laeuft eine einzige Instanz mit einem zentralen
+Satz an Secrets und einer zentralen Inbox.
+
+Neue Projekte sollen ohne Code-Aenderung an dieser API angebunden werden
+koennen.
 
 ## 2. Welche bestehenden Projekte spaeter angebunden werden sollen
 
@@ -52,11 +54,22 @@ Zusaetzlich: OPTIONS-Preflight fuer beide POST-Routen, 405-Catch-All.
 
 ## 5. Project-Erkennung und formType-Ableitung
 
-### 5.1 Grundprinzip: nichts Blindes aus dem Body
+### 5.1 Grundprinzip
 
 - `project` wird NICHT aus dem Request-Body akzeptiert.
 - `project` wird aus dem Origin-Header des Requests abgeleitet.
 - `formType` wird aus der Route abgeleitet.
+- Die Projekt-Erkennung dient AUSSCHLIESSLICH:
+  - Wahl des Zod-Schemas (email optional vs. Pflicht)
+  - E-Mail-Betreff (Projekt/Domain sichtbar)
+  - E-Mail-Body (Projekt/Domain sichtbar)
+  - CORS-Erlaubnis (welche Origins duerfen)
+  - Logging-Kontext
+
+- Die Projekt-Erkennung dient NICHT:
+  - Auswahl von Secrets (Turnstile, SMTP)
+  - Auswahl von Empfaenger- oder Absender-Adressen
+  - unterschiedlichen Turnstile-Keys
 
 ### 5.2 project aus Origin ableiten
 
@@ -97,65 +110,51 @@ Request.
 2. Origin gegen erlaubte Origins matchen (CORS)
 3. Origin auf project mappen (statische Lookup-Tabelle)
 4. Route parsen -> formType
-5. CORS-Origin-Set dynamisch aus Projektkonfiguration laden
-6. (project, formType) -> Konfiguration (Schema, Template, Empfaenger, Turnstile)
+5. CORS-Origin-Set dynamisch aus Projekt-Mapping laden
+6. (project, formType) -> Schema + E-Mail-Template (Betreff/Body)
+7. Secrets (Turnstile, SMTP) sind zentral, nicht pro Projekt
 ```
 
-## 6. Zielmodell: statisches Mapping + Env-Secrets
+## 6. Konfigurationsmodell: statisches Mapping + zentrale Env-Secrets
+
+### 6.1 Zentrale Env-Variablen (komplett, V1)
+
+```
+TURNSTILE_SECRET_KEY    (Pflicht)  -- ein gemeinsamer Key fuer alle Projekte
+SMTP_HOST               (Pflicht)  -- zentraler Mailserver
+SMTP_PORT               (default 587)
+SMTP_SECURE             (default false)
+SMTP_USER               (optional) -- SMTP-Auth
+SMTP_PASS               (optional) -- SMTP-Auth
+CONTACT_TO_EMAIL        (Pflicht)  -- zentrale Inbox fuer alle Projekte
+CONTACT_FROM_EMAIL      (Pflicht)  -- zentraler Absender
+PORT                    (default 3000)
+```
+
+Das sind ALLE Env-Variablen. Keine projekt-spezifischen Variablen.
+Keine TURNSTILE_SECRET_AMTKLAR o. ae.
+Keine CONTACT_TO_AMTKLAR o. ae.
+
+### 6.2 Statisches Mapping im Code
 
 ```
 Origin -> project
 Route  -> formType
 (project, formType) -> {
   schema,           // Zod-Schema (pro Formular)
-  toEmail,          // Empfaenger-E-Mail
-  fromEmail,        // Absender-E-Mail
-  subject,          // E-Mail-Betreff
-  bodyTextLines,    // Funktion: (data, timestamp) -> string[]
-  turnstileSecret,  // Cloudflare Turnstile Secret Key (aus Env)
+  subject,          // E-Mail-Betreff (string, Projekt/Domain sichtbar)
+  bodyTextLines,    // Funktion: (data, timestamp, projectLabel) -> string[]
   corsOrigins,      // Erlaubte Origins fuer dieses Projekt
 }
 ```
 
-Das Mapping ist in V1 ein statisches Objekt im Code (TypeScript-Modul).
-Umgebungsspezifische Secrets (SMTP-Login, Turnstile-Keys) werden aus
-Environment Variables gelesen.
+Kein `toEmail`, kein `fromEmail`, kein `turnstileSecret` im Mapping.
+Diese Werte kommen zentral aus den Env-Variablen (6.1).
 
-Keine Datenbank, keine Runtime-Admin-Oberflaeche, kein dynamisches
-Nachladen von Konfiguration.
+### 6.3 Keine Datenbank, keine Admin-Oberflaeche
 
-### 6.1 Env-Variablen pro Projekt
-
-SMTP ist projektuebergreifend (ein Mailserver).
-
-Turnstile-Secrets pro Projekt:
-
-```
-TURNSTILE_SECRET_AMTKLAR
-TURNSTILE_SECRET_PV_NETZANSCHLUSS
-TURNSTILE_SECRET_VZDNUR
-```
-
-SMTP (gemeinsam):
-
-```
-SMTP_HOST
-SMTP_PORT (default 587)
-SMTP_SECURE (default false)
-SMTP_USER
-SMTP_PASS
-```
-
-Empfaenger-E-Mails pro Projekt (Defaultwerte, ueberschreibbar):
-
-```
-CONTACT_TO_AMTKLAR          (default: hallo@amtklar.at)
-CONTACT_FROM_AMTKLAR        (default: hallo@amtklar.at)
-CONTACT_TO_PV_NETZANSCHLUSS (default: hallo@pv-netzanschluss.at)
-CONTACT_FROM_PV_NETZANSCHLUSS (default: hallo@pv-netzanschluss.at)
-CONTACT_TO_VZDNUR           (default: hello@vzdnur.com)
-CONTACT_FROM_VZDNUR         (default: hello@vzdnur.com)
-```
+Das Mapping ist in V1 ein statisches Objekt im TypeScript-Code.
+Keine Datenbank. Kein dynamisches Nachladen. Keine Runtime-Admin-UI.
 
 ## 7. Benoetigte Projekt/Form-Kombinationen
 
@@ -201,7 +200,7 @@ Felder:
 E-Mail-Template:
 
 ```
-Subject: AMTKLAR Contact Request
+Subject: [amtklar.at] Contact Request
 Body:
   New contact request from amtklar.at
   Timestamp: {timestamp}
@@ -243,7 +242,7 @@ Felder:
 E-Mail-Template:
 
 ```
-Subject: PV-Netzanschluss Contact Request
+Subject: [pv-netzanschluss.at] Contact Request
 Body:
   New contact request from pv-netzanschluss.at
   Timestamp: {timestamp}
@@ -258,7 +257,7 @@ replyTo: immer data.email.
 
 CORS Origins: `https://pv-netzanschluss.at`, `https://www.pv-netzanschluss.at`
 
-Log bei Mail-Fehler: `console.error('contact-api: mail send failed', { timestamp, ip, email: data.email })`
+Log bei Mail-Fehler: `console.error('contact-api: mail send failed', { timestamp, ip, email: data.email, project })`
 
 ### 8.3 pv-netzanschluss / demo-feedback
 
@@ -305,14 +304,14 @@ JSON-String-Array-Transformation (`parseStringArray`):
 - Validierung: muss ein Array sein
 - Normalisierung: nur string-Elemente werden behalten, getrimmt, leere entfernt
 - Fehler bei non-string items: `valuableItems must contain only strings`
-- Fehler bei ungültigem JSON: `valuableItems must be valid JSON`
+- Fehler bei ungueltigem JSON: `valuableItems must be valid JSON`
 - Cap: maximal 30 Elemente
 - Rueckgabe: `string[]`
 
 E-Mail-Template:
 
 ```
-Subject: [PV-Netzanschluss] Demo Feedback / Pilotinteresse
+Subject: [pv-netzanschluss.at] Demo Feedback / Pilotinteresse
 Body:
   Neues Demo Feedback
 
@@ -396,7 +395,7 @@ Felder:
 E-Mail-Template:
 
 ```
-Subject: VZDNUR Contact Request
+Subject: [vzdnur.com] Contact Request
 Body:
   New contact request from vzdnur.com
   Timestamp: {timestamp}
@@ -418,12 +417,26 @@ CORS Origins: `https://vzdnur.com`, `https://www.vzdnur.com`
 | email Pflicht        | nein         | ja               | ja           |
 | email Validation     | optional     | .email()         | .email()     |
 | replyTo              | bedingt      | immer            | immer        |
-| Betreff              | AMTKLAR ...  | PV-Netzanschluss.| VZDNUR ...  |
+| Betreff              | [amtklar.at] | [pv-netzanschluss.at] | [vzdnur.com] |
 | Body-Intro           | amtklar.at   | pv-netzanschluss.| vzdnur.com  |
 | Email-Platzhalter    | (not prov.)  | entfaellt        | entfaellt    |
-| Log bei Fehler       | nur timestamp| timestamp,ip,mail| timestamp,ip,mail |
+| Log bei Fehler       | +project     | +project         | +project     |
 
-## 9. Healthcheck
+Hinweis: Die Betreffzeilen wurden gegenuber den Original-APIs auf das Format
+`[domain] Contact Request` vereinheitlicht, da alle E-Mails in derselben
+zentralen Inbox landen und die Herkunft sofort erkennbar sein muss.
+
+## 9. Security (hart)
+
+- `toEmail` wird NIE aus dem Request bezogen — nur aus Env `CONTACT_TO_EMAIL`
+- `fromEmail` wird NIE aus dem Request bezogen — nur aus Env `CONTACT_FROM_EMAIL`
+- Keine Mail-Relay-Funktion — kein dynamischer Empfaenger
+- Turnstile serverseitig pruefen (wie bisher, ein zentraler Secret Key)
+- Honeypot-Feld `website` behalten (wie bisher)
+- Rate Limit: 3 Requests / 15 min pro IP (wie bisher, global)
+- CORS streng: nur gemappte Origins pro Projekt
+
+## 10. Healthcheck
 
 ### GET /health
 
@@ -437,16 +450,37 @@ V1-Implementierung:
 
 Erweiterung auf Deep-Checks fruehestens in V2, falls betrieblich notwendig.
 
-## 10. Grober Migrationsplan ohne Downtime
+## 11. Neue Projekte onboarden (V1-Designziel)
+
+Fuer ein neues Projekt sind KEINE Code-Aenderungen an dieser API noetig.
+
+Noetig ist nur:
+
+1. **Cloudflare Turnstile:** Die neue Domain im gemeinsamen Turnstile-Widget
+   in der Cloudflare-Dashboard-Konfiguration erlauben.
+2. **Frontend:** Den gemeinsamen `PUBLIC_TURNSTILE_SITE_KEY` im Frontend
+   der neuen Website verwenden.
+3. **Nginx:** `proxy_pass http://shared-contact-api:3000;` fuer
+   `/api/contact` (und ggf. `/api/demo-feedback`) im Web-Nginx setzen.
+4. **Mapping erweitern (optional):** Falls das neue Projekt ein eigenes
+   Schema oder E-Mail-Template braucht, einen Eintrag im statischen
+   Mapping ergaenzen. Bei Standard-Contact-Formular (name, email, message)
+   kann ein bestehendes Schema mit passender email-Regel (optional/Pflicht)
+   wiederverwendet werden.
+
+## 12. Grober Migrationsplan ohne Downtime
 
 ### Infrastruktur-Zielbild
 
 ```
-                        ┌─────────────────────┐
-                        │ shared-contact-api   │
-                        │ (Docker Container)    │
-                        │ Port 3000             │
-                        └──────────┬──────────┘
+                        ┌─────────────────────────────────────┐
+                        │ shared-contact-api                  │
+                        │ (Docker Container)                  │
+                        │ Port 3000                           │
+                        │ Env: TURNSTILE_SECRET_KEY, SMTP_*,  │
+                        │      CONTACT_TO_EMAIL,              │
+                        │      CONTACT_FROM_EMAIL             │
+                        └──────────┬──────────────────────────┘
                                    │
               ┌────────────────────┼────────────────────┐
               │                    │                    │
@@ -474,23 +508,26 @@ Erweiterung auf Deep-Checks fruehestens in V2, falls betrieblich notwendig.
 - Alle drei Referenz-Server.ts exakt ausgelesen
 - Schemas, Templates, CORS, Defaults dokumentiert
 - Unterschiede identifiziert
+- Architekturentscheidung zentral vs. pro Projekt getroffen
 - SHARED-CONTACT-API-PLAN.md erstellt (dieses Dokument)
 
 ### Phase 2: Umbau lokal (kein Deploy)
 
 - project-Erkennung aus Origin implementieren (statische Lookup-Tabelle)
 - formType-Ableitung aus Route
-- Konfigurations-Mapping (project, formType) -> schema/template/recipient
+- Konfigurations-Mapping (project, formType) -> schema, subject, bodyTemplate, corsOrigins
+- KEIN toEmail/fromEmail/turnstileSecret im Mapping — kommt zentral aus Env
 - Alle vier Formular-Schemas anlegen (3x contact + 1x demo-feedback)
 - `parseStringArray`-Hilfsfunktion aus PV-Codebase uebernehmen
 - /health-Endpunkt hinzufuegen (nur 200 + ok)
 - /api/demo-feedback-Route hinzufuegen
-- /api/contact-Route mandantenfaehig machen
-- E-Mail-Templates mandantenfaehig machen
+- /api/contact-Route mandantenfaehig machen (Schema-Wahl + Template-Wahl)
+- E-Mail-Templates mandantenfaehig machen (Betreff mit Domain-Praefix)
 - CORS dynamisch pro Projekt laden
-- Keine Akzeptanz von `project` aus dem Request-Body (ausser Validierung
-  auf Konsistenz, siehe 5.4)
-- Env fuer alle Projekte vorbereiten (TURNSTILE_SECRET_*, CONTACT_*)
+- Zentraler Turnstile-Secret-Key (EIN Wert, nicht mehrere)
+- Zentraler SMTP + zentrale Inbox
+- Keine Akzeptanz von `toEmail`/`fromEmail`/`turnstileSecret` aus Body
+- Projekt-Feld im Body nur validieren, nicht verwenden
 
 ### Phase 3: Staging-Test
 
@@ -514,47 +551,51 @@ Erweiterung auf Deep-Checks fruehestens in V2, falls betrieblich notwendig.
 - Naechstes Projekt umstellen
 - Kein Big-Bang — Projekte einzeln migrierbar
 
-## 11. Rate-Limiting-Entscheidung
+## 13. Rate-Limiting-Entscheidung
 
 - Rate Limit global ueber alle Projekte: 3 Requests / 15 min pro IP
 - Identisch zum aktuellen Stand in allen drei Einzel-APIs
 - Bei Engpaessen in V2: Rate Limit pro Projekt konfigurierbar machen
 
-## 12. Offene Fragen
+## 14. Offene Fragen
 
-1. **project + formType Uebermittlung:**
-   Geklaert: project aus Origin, formType aus Route.
-   Offen: Was tun bei Requests ohne Origin-Header (same-origin, Server-
-   to-Server)?
+1. **Requests ohne Origin-Header:**
+   Was tun bei Requests ohne Origin (same-origin, Server-to-Server)?
+   Fallback auf Host-Header? Default-Project? Requests ohne Origin
+   ablehnen?
 
 2. **Origin-Mapping bei mehreren Domains pro Projekt:**
    Soll z. B. https://vzdnur.at auch auf project=vzdnur gemappt werden?
-   Falls ja: Mapping-Tabelle um Eintraege erweitern.
+   Mapping-Tabelle bei Bedarf um Eintraege erweitern.
 
-3. **Turnstile Secret Keys:**
-   Pro Projekt ein eigener Key (empfohlen). Env-Variablen:
-   TURNSTILE_SECRET_AMTKLAR, TURNSTILE_SECRET_PV_NETZANSCHLUSS,
-   TURNSTILE_SECRET_VZDNUR. Bereits im Plan festgehalten.
+3. **Gemeinsames Turnstile-Widget:**
+   Ist das gemeinsame Cloudflare Turnstile-Widget bereits angelegt?
+   Welcher `PUBLIC_TURNSTILE_SITE_KEY` soll in den Frontends verwendet
+   werden? Sind alle drei (bzw. vier mit www) Domains im Widget
+   konfiguriert?
 
-4. **SMTP-Konfiguration:**
-   Ein gemeinsamer SMTP-Server oder projektspezifische Absender?
-   Aktuell bei allen drei Projekten unterschiedliche From/To-Defaults
-   aber potenziell gleicher SMTP-Server. Klaeren, ob ein gemeinsamer
-   SMTP alle drei Absender-Domains abdeckt (SPF/DKIM).
+4. **Zentrale Inbox:**
+   Welche E-Mail-Adresse soll als `CONTACT_TO_EMAIL` verwendet werden?
+   Soll es eine neue Sammel-Adresse sein oder eine bestehende?
 
-5. **Rate Limiting:**
+5. **SMTP-Absender-Domain:**
+   Welche Domain wird als Absender (`CONTACT_FROM_EMAIL`) verwendet?
+   SPF/DKIM muss fuer diese Domain eingerichtet sein.
+
+6. **Rate Limiting:**
    3 Requests / 15 min pro IP global ueber alle Projekte — ausreichend
    oder sollen es 3 pro Projekt sein? Entscheidung: V1 global.
 
-6. **Logging und Monitoring:**
+7. **Logging und Monitoring:**
    Welches Format? Aktuell nur `console.error` bei Mail-Fehlern.
    Soll einheitliches Structured-JSON-Logging eingefuehrt werden?
-   Metriken fuer Prometheus?
+   Metriken fuer Prometheus? Das `project` soll im Log-Kontext
+   auftauchen.
 
-7. **Docker-Image-Name und Tagging:**
+8. **Docker-Image-Name und Tagging:**
    Wie soll das Image heissen? `shared-contact-api:latest`?
    Versionierung?
 
-8. **Deployment-Target:**
+9. **Deployment-Target:**
    Auf welchem Host / Cluster laeuft die shared-contact-api?
    Gleicher Docker-Host wie die Web-Nginx-Container der Projekte?
